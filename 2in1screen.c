@@ -7,25 +7,28 @@
  *   - TRANSFORM_PROPERTIES and TRANSFORM_PROPERTIES_SIZE
  *   - TRANSFORM matrixes
  *   - function rotation_changed's conditions
- */
-
-/*
+ *
  * TRANSFORM_PROPERTIES_SIZE: number of TRANSFORM_PROPERTIES items
  * TRANSFORM_PROPERTIES: alternating device and property items
+ *
  * To get transform devices:
  *   xinput list| grep -i 'touchpad\|pen\|finger'
+ *
  * To get transform matrix properties:
  *   xinput list-props "Wacom HID 5073 Pen" | grep "Coordinate Transformation Matrix"
  */
+
 #define TRANSFORM_PROPERTIES_SIZE 0
 char
   *TRANSFORM_PROPERTIES[TRANSFORM_PROPERTIES_SIZE] = {};
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <errno.h>
 
 #include <xcb/xcb.h>
@@ -54,6 +57,7 @@ unsigned char
   current_state = 0,
   keep_running = 1;
 
+#define STRESS_CYCLES 20
 #define DATA_SIZE 256
 char
   basedir[DATA_SIZE],
@@ -89,10 +93,9 @@ xcb_randr_crtc_t xcb_randr_crtc;
 xcb_input_device_id_t xcb_input_device_id;
 xcb_window_t xcb_root;
 xcb_connection_t *xcb_connection = NULL;
-xcb_input_device_info_t *xcb_input_device_info = NULL;
 xcb_randr_screen_size_t *xcb_randr_screen_size = NULL;
 
-char xcb_detect_randr_crtc(const char *name, const int name_size){
+static inline char xcb_detect_randr_crtc(const char *name, const int name_size) {
 	xcb_randr_get_screen_resources_reply_t *screen_resources = xcb_randr_get_screen_resources_reply(
     xcb_connection,
     xcb_randr_get_screen_resources(xcb_connection, xcb_root),
@@ -149,7 +152,7 @@ char xcb_detect_randr_crtc(const char *name, const int name_size){
   return success;
 }
 
-char xcb_init() {
+static inline char xcb_init() {
   // xcb_connection
 	xcb_connection = xcb_connect(NULL, &xcb_default_screen);
 	if (xcb_connection_has_error(xcb_connection)){
@@ -190,13 +193,12 @@ char xcb_init() {
 	return EXIT_SUCCESS;
 }
 
-void xcb_close() {
+static inline void xcb_close() {
 	if (xcb_connection != NULL) xcb_disconnect(xcb_connection);
-  if (xcb_input_device_info != NULL) free(xcb_input_device_info);
-  if (xcb_randr_screen_size != NULL) free(xcb_randr_screen_size);
+  else if (xcb_randr_screen_size != NULL) free(xcb_randr_screen_size);
 }
 
-int xcb_set_config(xcb_randr_crtc_t crtc, uint16_t rotation){
+static inline int xcb_set_config(xcb_randr_crtc_t crtc, uint16_t rotation){
 	xcb_generic_error_t *e = NULL;
 	xcb_randr_get_crtc_info_reply_t *crtc_info = xcb_randr_get_crtc_info_reply(
     xcb_connection,
@@ -251,7 +253,7 @@ int xcb_set_config(xcb_randr_crtc_t crtc, uint16_t rotation){
 	return EXIT_SUCCESS;
 }
 
-void xcb_rotate_screen() {
+static inline void xcb_rotate_screen() {
   int rotation;
   int width;
   int height;
@@ -293,7 +295,7 @@ void xcb_rotate_screen() {
   xcb_flush(xcb_connection);
 }
 
-char rotation_changed() {
+static inline char rotation_changed() {
 
   // do not attempt to change orientation when horizontal
   if (accel_z < -accel_threshold || accel_z > accel_threshold) return 0;
@@ -324,35 +326,10 @@ FILE* bdopen (char const *fname, unsigned char leave_open) {
   return fin;
 }
 
-double read_dev_accel (FILE* fd) {
+static inline double read_dev_accel (FILE* fd) {
   fseek(fd, 0, SEEK_SET);
   fgets(content, DATA_SIZE, fd);
   return atof(content) * accel_scale;
-}
-
-void execute(char const *command) {
-  if (verbosity) {
-    printf("%s\n", command);
-  }
-  system(command);
-}
-
-void rotate_screen() {
-  char command[DATA_SIZE * 4];
-
-  sprintf(command, "xrandr -o %s", ROTATION[current_state]);
-  execute(command);
-
-  for (char i = 0; i < TRANSFORM_PROPERTIES_SIZE; i += 2) {
-    sprintf(
-      command,
-      "xinput set-prop \"%s\" --type=float \"%s\" %s",
-      TRANSFORM_PROPERTIES[i],
-      TRANSFORM_PROPERTIES[i + 1],
-      TRANSFORM[current_state]
-    );
-    execute(command);
-  }
 }
 
 void help(char const *argv0) {
@@ -370,6 +347,21 @@ void help(char const *argv0) {
 void handle_signal(int sig) {
   if (sig == SIGTERM || sig == SIGINT || sig == SIGHUP) {
     keep_running = 0;
+  }
+}
+
+void debug(const char* format, ...) {
+  va_list args;
+  if (verbosity) {
+    time_t now;
+    char isotime[21];
+    char prefixed[strlen(format) + sizeof isotime + 5];
+    time(&now);
+    strftime(isotime, sizeof isotime, "%FT%TZ", gmtime(&now));
+    sprintf(prefixed, "[ %s ] %s", isotime, format);
+    va_start(args, format);
+    vprintf(prefixed, args);
+    va_end(args);
   }
 }
 
@@ -413,33 +405,36 @@ int main(int argc, char const *argv[]) {
   bdopen("in_accel_scale", 0);
   accel_scale = atof(content);
   FILE *dev_accel_x = bdopen("in_accel_x_raw", 1);
-  accel_x = atof(content) * accel_scale;
   FILE *dev_accel_y = bdopen("in_accel_y_raw", 1);
-  accel_y = atof(content) * accel_scale;
   FILE *dev_accel_z = bdopen("in_accel_z_raw", 1);
-  accel_z = atof(content) * accel_scale;
 
   xcb_init();
 
+  unsigned char stress_cycle = 0;
   while (keep_running) {
-    if (verbosity) {
-      printf(
-        "Accelerometer x=%2f y=%2f z=%2f (%s)\n",
-        accel_x,
-        accel_y,
-        accel_z,
-        ROTATION[current_state]
-        );
-    }
-    if (rotation_changed()) {
-      xcb_rotate_screen();
-      // rotate_screen();
-    }
-    sleep(2);
-
     accel_x = read_dev_accel(dev_accel_x);
     accel_y = read_dev_accel(dev_accel_y);
     accel_z = read_dev_accel(dev_accel_z);
+
+    debug(
+      "Accelerometer x=%2f y=%2f z=%2f (%s)\n",
+      accel_x,
+      accel_y,
+      accel_z,
+      ROTATION[current_state]
+    );
+
+    if (rotation_changed()) {
+      xcb_rotate_screen();
+      stress_cycle = STRESS_CYCLES;
+    }
+
+    if (stress_cycle > 0) {
+      usleep(5000);
+      stress_cycle--;
+    } else {
+      sleep(1);
+    }
   }
 
   xcb_close();
