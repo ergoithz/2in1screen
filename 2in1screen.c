@@ -382,8 +382,13 @@ int main(int argc, char const *argv[]) {
       help(argv[0]);
       return EXIT_SUCCESS;
     } else {
-      fprintf(stderr, "Invalid argument %s\n\n", arg);
-      help(argv[0]);
+      fprintf(
+        stderr,
+        "%s: invalid option -- '%s'\nTry '%s --help' for more information.\n",
+        argv[0],
+        arg,
+        argv[0]
+      );
       return EXIT_FAILURE;
     }
   }
